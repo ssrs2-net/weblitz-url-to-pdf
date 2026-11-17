@@ -1,0 +1,148 @@
+name: Print a page
+
+# The showcase, live on GitHub: open an issue with the "Print a page" form (or run this workflow by hand) and the API,
+# started from its published image, prints the page; the PDF is the run's artifact, linked from a comment on the issue.
+# What an issue says is a stranger's text: it is read as data (never part of a command) and held to an address and a
+# paper's name; the API itself prints public pages only.
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'The page to print'
+        required: true
+        type: string
+      format:
+        description: 'Paper'
+        type: choice
+        default: A4
+        options: [A4, Letter, Legal, A3]
+      landscape:
+        description: 'Landscape'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+  packages: read
+
+concurrency:
+  group: print
+  cancel-in-progress: false
+
+jobs:
+  print:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'print') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Read the request
+      id: request
+      env:
+        ISSUE_BODY: ${{ github.event.issue.body }}
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_LANDSCAPE: ${{ inputs.landscape }}
+      run: |
+        python3 - <<'PY' >> "$GITHUB_OUTPUT"
+        import os, re
+        body = os.environ.get("ISSUE_BODY", "")
+        def field(title):
+            # (an issue form writes "### Title", a blank line, then the answer)
+            found = re.search(r"^###\s*" + re.escape(title) + r"\s*\n+([^\n]*)", body, re.M)
+            return found.group(1).strip() if found else ""
+        if body:
+            url, paper, landscape = field("Page address"), field("Paper"), "[x]" in body.lower()
+        else:
+            url, paper, landscape = os.environ["INPUT_URL"].strip(), os.environ["INPUT_FORMAT"], os.environ["INPUT_LANDSCAPE"] == "true"
+        if url and "://" not in url:
+            url = "https://" + url
+        ok = bool(re.fullmatch(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]{1,2000}", url))
+        if paper not in ("A4", "Letter", "Legal", "A3"):
+            paper = "A4"
+        print("ok=" + ("true" if ok else "false"))
+        print("url=" + (url if ok else ""))
+        print("format=" + paper)
+        print("landscape=" + ("true" if landscape else "false"))
+        PY
+
+    - uses: docker/login-action@v3
+      if: steps.request.outputs.ok == 'true'
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Print
+      id: print
+      if: steps.request.outputs.ok == 'true'
+      env:
+        PAGE_URL: ${{ steps.request.outputs.url }}
+        PAGE_FORMAT: ${{ steps.request.outputs.format }}
+        PAGE_LANDSCAPE: ${{ steps.request.outputs.landscape }}
+      run: |
+        docker run -d --name api -p 8080:8080 "ghcr.io/${GITHUB_REPOSITORY,,}:latest" > /dev/null
+        for i in $(seq 1 60); do curl -fs http://localhost:8080/health > /dev/null && break; sleep 2; done
+        status=$(curl -s -G -o page.pdf -D headers.txt -w '%{http_code}' --max-time 180 \
+          --data-urlencode "url=$PAGE_URL" --data-urlencode "format=$PAGE_FORMAT" --data-urlencode "landscape=$PAGE_LANDSCAPE" \
+          http://localhost:8080/pdf)
+        header() { grep -i "^$1:" headers.txt | head -1 | cut -d' ' -f2- | tr -d '\r'; }
+        {
+          echo "status=$status"
+          echo "pages=$(header X-Weblitz-Pages)"
+          echo "elapsed=$(header X-Weblitz-Elapsed-Ms)"
+          echo "site=$(header X-Weblitz-Document-Status)"
+          echo "size=$(( $(stat -c %s page.pdf) / 1024 ))"
+        } >> "$GITHUB_OUTPUT"
+        if [ "$status" != 200 ]; then
+          # (the API's refusal: JSON with its reason)
+          echo "reason=$(python3 -c 'import json,sys; print(json.load(open("page.pdf")).get("detail", "")[:300].replace("\n", " "))' 2>/dev/null)" >> "$GITHUB_OUTPUT"
+          rm -f page.pdf
+        fi
+
+    - name: Keep the PDF
+      id: artifact
+      if: steps.print.outputs.status == '200'
+      uses: actions/upload-artifact@v4
+      with:
+        name: page-pdf
+        path: page.pdf
+        retention-days: 3
+
+    - name: Say the result
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ISSUE: ${{ github.event.issue.number }}
+        OK: ${{ steps.request.outputs.ok }}
+        PAGE_URL: ${{ steps.request.outputs.url }}
+        STATUS: ${{ steps.print.outputs.status }}
+        PAGES: ${{ steps.print.outputs.pages }}
+        ELAPSED: ${{ steps.print.outputs.elapsed }}
+        SITE: ${{ steps.print.outputs.site }}
+        SIZE: ${{ steps.print.outputs.size }}
+        REASON: ${{ steps.print.outputs.reason }}
+        ARTIFACT: ${{ steps.artifact.outputs.artifact-url }}
+        RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        if [ "$OK" != true ]; then
+          text="That is not an address I can print: write an http or https address, like https://example.com."
+        elif [ "$STATUS" = 200 ]; then
+          text="Printed \`$PAGE_URL\`: $PAGES page(s) in $ELAPSED ms, $SIZE KB.
+
+        **[Download the PDF]($ARTIFACT)** (a zip holding page.pdf; kept three days; GitHub asks you to be signed in).
+
+        Printed by [Weblitz](https://weblitzpdf.com) without a licence, so each page carries the trial watermark. [This run]($RUN)."
+          [ -n "$SITE" ] && [ "$SITE" != 200 ] && text="$text
+
+        The site answered $SITE: what it sent for that is what was printed."
+        else
+          text="\`$PAGE_URL\` was not printed (${STATUS:-no answer}): ${REASON:-the API gave no reason}. [This run]($RUN)."
+        fi
+        printf '%s\n' "$text" >> "$GITHUB_STEP_SUMMARY"
+        if [ -n "$ISSUE" ]; then
+          printf '%s\n' "$text" > comment.md
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file comment.md
+          gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" --reason "$([ "$STATUS" = 200 ] && echo completed || echo 'not planned')"
+        fi

@@ -1,0 +1,16 @@
+{
+  // Open the repository in a codespace (Code > Codespaces > Create): the API builds, starts and opens in a preview.
+  "name": "Web page to PDF (Weblitz showcase)",
+  "image": "mcr.microsoft.com/dotnet/sdk:10.0",
+  "containerEnv": {
+    "DOTNET_TieredPGO_InstrumentOnlyHotCode": "0",
+    "DOTNET_CLI_TELEMETRY_OPTOUT": "1"
+  },
+  "forwardPorts": [8080],
+  "portsAttributes": {
+    "8080": { "label": "Web page to PDF", "onAutoForward": "openPreview" }
+  },
+  // The fonts a Linux container lacks (Arabic, Chinese, Japanese, Korean, Thai, the Indic scripts, emoji), then the build
+  "onCreateCommand": "apt-get update && apt-get install -y --no-install-recommends libfontconfig1 fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji && dotnet build src -c Release",
+  "postAttachCommand": "dotnet run --project src -c Release --no-build --urls http://0.0.0.0:8080"
+}

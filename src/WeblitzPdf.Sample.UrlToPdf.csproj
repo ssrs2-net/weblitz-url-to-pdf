@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!-- A showcase, not a supported product: an HTTP API that takes a web address and answers its PDF, printed by
+       Weblitz (the WeblitzPdf package). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>WeblitzPdf.Sample.UrlToPdf</RootNamespace>
+    <AssemblyName>weblitz-url-to-pdf</AssemblyName>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WeblitzPdf" Version="2.0.0-beta.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="WeblitzPdf.Sample.UrlToPdf.Tests" />
+  </ItemGroup>
+
+
+</Project>

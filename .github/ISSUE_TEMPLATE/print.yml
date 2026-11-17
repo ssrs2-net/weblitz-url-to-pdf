@@ -1,0 +1,29 @@
+name: Print a page
+description: Give a public page's address; its PDF comes back as a comment in about a minute.
+title: "Print: "
+labels: ["print"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The showcase prints the page on GitHub's own runners and answers here with the PDF. Public pages only.
+        The PDF carries a trial watermark (the showcase runs without a licence).
+  - type: input
+    id: url
+    attributes:
+      label: Page address
+      placeholder: https://example.com
+    validations:
+      required: true
+  - type: dropdown
+    id: paper
+    attributes:
+      label: Paper
+      options: [A4, Letter, Legal, A3]
+      default: 0
+  - type: checkboxes
+    id: orientation
+    attributes:
+      label: Orientation
+      options:
+        - label: Landscape
