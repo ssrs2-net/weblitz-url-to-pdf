@@ -138,6 +138,7 @@ jobs:
 
         The site answered $SITE: what it sent for that is what was printed."
         else
+          REASON=${REASON%.}
           text="\`$PAGE_URL\` was not printed (${STATUS:-no answer}): ${REASON:-the API gave no reason}. [This run]($RUN)."
         fi
         printf '%s\n' "$text" >> "$GITHUB_STEP_SUMMARY"

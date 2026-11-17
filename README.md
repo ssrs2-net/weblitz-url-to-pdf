@@ -25,7 +25,8 @@ It runs in your own codespace, on your GitHub account's free hours.
 docker run --rm -p 8080:8080 ghcr.io/ssrs2-net/weblitz-url-to-pdf
 ```
 
-then open http://localhost:8080, or use `curl` as above. The image is built for x64 and ARM64.
+then open http://localhost:8080, or use `curl` as above. The image is built for x64 and ARM64. To build it yourself:
+`docker build -t weblitz-url-to-pdf src`.
 
 **From the source** (the .NET 10 SDK):
 
