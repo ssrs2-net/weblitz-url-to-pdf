@@ -16,6 +16,25 @@ public sealed class ShowcaseOptions
     /// <summary>The most pages a PDF holds (the document is cut there).</summary>
     public int MaxPages { get; set; } = 200;
 
+    /// <summary>The largest HTML a caller may post (POST /pdf {"html": ...}), in kilobytes of UTF-8.</summary>
+    public int MaxHtmlKilobytes { get; set; } = 512;
+
+    /// <summary>The most elements and other nodes a page may have, the parser's and its scripts' (0: the engine's own
+    /// limit, a million): what bounds a page's memory, with <see cref="MaxResourceMegabytes"/>.</summary>
+    public int MaxNodes { get; set; }
+
+    /// <summary>The most a page's resources (pictures, fonts, scripts, styles) may weigh in all, in megabytes (0: the
+    /// engine's own limit, 200).</summary>
+    public int MaxResourceMegabytes { get; set; }
+
+    /// <summary>Whether a page printed from its address leaves out its consent boxes (HtmlConsent.Hide: nothing is
+    /// clicked or answered) unless the caller asks for them (consent=keep).</summary>
+    public bool HideConsent { get; set; }
+
+    /// <summary>Whether a page printed from its address leaves out its advertisements and trackers (HtmlAds.Block, by
+    /// the filter lists the package carries) unless the caller asks for them (ads=keep).</summary>
+    public bool BlockAds { get; set; }
+
     /// <summary>How long a page's scripts may run.</summary>
     public int ScriptSeconds { get; set; } = 30;
 

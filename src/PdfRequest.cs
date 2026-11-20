@@ -13,6 +13,18 @@ public sealed class PdfRequest
     /// <summary>The page to print: https://example.com/page (example.com is taken as https://example.com).</summary>
     public string? Url { get; set; }
 
+    /// <summary>Or the HTML itself, in a posted request (POST /pdf {"html": "..."}): its resources are fetched from public
+    /// hosts, as a page's are. One of <see cref="Url"/> and Html, not both.</summary>
+    public string? Html { get; set; }
+
+    /// <summary>For an address: "hide" leaves its consent boxes out of the print (nothing is clicked), "keep" prints
+    /// them; none: the host's setting.</summary>
+    public string? Consent { get; set; }
+
+    /// <summary>For an address: "block" leaves its advertisements and trackers out, "keep" prints them; none: the
+    /// host's setting.</summary>
+    public string? Ads { get; set; }
+
     /// <summary>The paper: A4 (the default), Letter, Legal, Tabloid, Ledger, A0 to A6.</summary>
     public string? Format { get; set; }
 
@@ -125,6 +137,8 @@ public sealed class PdfRequest
             Download = Flag("download"),
             FileName = Text("fileName"),
             FailOnHttpError = Flag("failOnHttpError"),
+            Consent = Text("consent"),
+            Ads = Text("ads"),
         };
     }
 
@@ -140,6 +154,20 @@ public sealed class PdfRequest
         // (each selector its own rule: "nav, .sidebar" is two)
         var hide = (Hide ?? []).SelectMany(h => h.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)).ToArray();
         if (hide.Length > 50) throw new BadRequestException("hide takes 50 selectors at most.");
+        var hideConsent = Consent?.ToLowerInvariant() switch
+        {
+            null => showcase.HideConsent,
+            "hide" => true,
+            "keep" => false,
+            _ => throw new BadRequestException($"consent={Consent}: write hide or keep."),
+        };
+        var blockAds = Ads?.ToLowerInvariant() switch
+        {
+            null => showcase.BlockAds,
+            "block" => true,
+            "keep" => false,
+            _ => throw new BadRequestException($"ads={Ads}: write block or keep."),
+        };
 
         var margin = (Margin ?? MarginTop ?? MarginRight ?? MarginBottom ?? MarginLeft) is null ? null
             : new HtmlMargins(MarginTop ?? Margin, MarginRight ?? Margin, MarginBottom ?? Margin, MarginLeft ?? Margin);
@@ -172,7 +200,15 @@ public sealed class PdfRequest
             Styles = Css is null ? [] : [Css],
             DisplayHeaderFooter = HeaderFooter ?? false,
             Title = Title,
-            Limits = HtmlPdfLimits.Default with { MaxPages = showcase.MaxPages },
+            Limits = HtmlPdfLimits.Default with
+            {
+                MaxPages = showcase.MaxPages,
+                MaxNodes = showcase.MaxNodes > 0 ? showcase.MaxNodes : HtmlPdfLimits.Default.MaxNodes,
+                MaxTotalResourceBytes = showcase.MaxResourceMegabytes > 0 ? showcase.MaxResourceMegabytes * 1_000_000L : HtmlPdfLimits.Default.MaxTotalResourceBytes,
+            },
+            // (a page from the web: its consent boxes and its ads as the host and the caller ask; posted HTML is printed as written)
+            Consent = Html is null && hideConsent ? HtmlConsent.Hide : HtmlConsent.Keep,
+            Ads = Html is null && blockAds ? HtmlAds.Block : HtmlAds.Keep,
         };
         if (Format is not null) options = options with { Format = Format };
         if (Locale is not null) options = options with { Locale = Locale };
@@ -180,10 +216,11 @@ public sealed class PdfRequest
         return options;
     }
 
-    /// <summary>The PDF's file name: the caller's, else the page's host and path ("example.com-docs-install.pdf").</summary>
-    internal string FileNameFor(Uri address)
+    /// <summary>The PDF's file name: the caller's, else the page's host and path ("example.com-docs-install.pdf"), or
+    /// "document.pdf" for posted HTML.</summary>
+    internal string FileNameFor(Uri? address)
     {
-        var name = FileName ?? (address.Host + address.AbsolutePath).TrimEnd('/');
+        var name = FileName ?? (address is null ? "document" : (address.Host + address.AbsolutePath).TrimEnd('/'));
         var safe = new string(name.Select(c => char.IsLetterOrDigit(c) || c is '.' or '-' or '_' ? c : '-').ToArray()).Trim('-', '.');
         while (safe.Contains("--", StringComparison.Ordinal)) safe = safe.Replace("--", "-", StringComparison.Ordinal);
         if (safe.Length == 0) safe = "page";

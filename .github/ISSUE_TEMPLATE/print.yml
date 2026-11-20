@@ -1,13 +1,14 @@
 name: Print a page
-description: Give a public page's address; its PDF comes back as a comment in about a minute.
+description: Give a public page's address; Weblitz's PDF and Chrome's come back side by side in a few minutes.
 title: "Print: "
 labels: ["print"]
 body:
   - type: markdown
     attributes:
       value: |
-        The showcase prints the page on GitHub's own runners and answers here with the PDF. Public pages only.
-        The PDF carries a trial watermark (the showcase runs without a licence).
+        The showcase prints the page with Weblitz and with Chrome 156 on GitHub's own runners, and answers here with both
+        PDFs and their first pages side by side. If they differ, say what you see: that is a bug, and the next beta fixes
+        it. Public pages only. Weblitz's PDF carries a trial watermark (the showcase runs without a licence).
   - type: input
     id: url
     attributes:

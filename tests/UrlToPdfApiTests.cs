@@ -93,6 +93,67 @@ public sealed class UrlToPdfApiTests : IAsyncLifetime
         Assert.Equal("1", first.Headers.GetValues("X-Weblitz-Pages").Single());
     }
 
+    /// <summary>POST /pdf {"html": ...} prints the HTML itself (weblitzpdf.com/try forwards a visitor's HTML here).</summary>
+    [Fact]
+    public async Task PostedHtml_IsPrinted()
+    {
+        using var api = Api();
+        var response = await api.CreateClient().PostAsJsonAsync("/pdf", new { html = "<!doctype html><h1>Posted</h1><p id=p>before</p><script>document.getElementById('p').textContent = 'after ' + (6 * 7)</script>" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/pdf", response.Content.Headers.ContentType!.MediaType);
+        Assert.Equal("1", response.Headers.GetValues("X-Weblitz-Pages").Single());
+        Assert.Equal("document.pdf", response.Content.Headers.ContentDisposition!.FileName!.Trim('"'));
+    }
+
+    [Fact]
+    public async Task PostedHtml_IsRefused_WithAnAddressBesideIt_OrPastItsSize()
+    {
+        using var api = Api(settings: ("Weblitz:MaxHtmlKilobytes", "1"));
+        var client = api.CreateClient();
+
+        var both = await client.PostAsJsonAsync("/pdf", new { html = "<h1>Hi</h1>", url = new Uri(_site.Address, "/page").AbsoluteUri });
+        var large = await client.PostAsJsonAsync("/pdf", new { html = "<p>" + new string('x', 2000) + "</p>" });
+        var empty = await client.PostAsJsonAsync("/pdf", new { html = "   " });
+
+        Assert.Equal(HttpStatusCode.BadRequest, both.StatusCode);
+        Assert.Contains("not both", await Detail(both));
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, large.StatusCode);
+        Assert.Contains("larger than 1 KB", await Detail(large));
+        Assert.Equal(HttpStatusCode.BadRequest, empty.StatusCode);
+        Assert.Equal(0, _site.Hits("/page"));
+    }
+
+    /// <summary>The public settings: an address's consent boxes and ads left out when the host says so (the caller may
+    /// keep them), posted HTML printed as written, and the limits on a page's nodes and resources passed to the engine.</summary>
+    [Fact]
+    public void ConsentAdsAndLimits_AreTheHostsUnlessTheCallerSays()
+    {
+        var host = new ShowcaseOptions { HideConsent = true, BlockAds = true, MaxNodes = 200_000, MaxResourceMegabytes = 50, MaxPages = 20 };
+
+        var page = new PdfRequest { Url = "https://example.com" }.ToOptions(host);
+        Assert.Equal(HtmlConsent.Hide, page.Consent);
+        Assert.Equal(HtmlAds.Block, page.Ads);
+        Assert.Equal(200_000, page.Limits.MaxNodes);
+        Assert.Equal(50_000_000L, page.Limits.MaxTotalResourceBytes);
+        Assert.Equal(20, page.Limits.MaxPages);
+
+        var kept = new PdfRequest { Url = "https://example.com", Consent = "keep", Ads = "keep" }.ToOptions(host);
+        Assert.Equal(HtmlConsent.Keep, kept.Consent);
+        Assert.Equal(HtmlAds.Keep, kept.Ads);
+
+        var html = new PdfRequest { Html = "<h1>Hi</h1>" }.ToOptions(host);
+        Assert.Equal(HtmlConsent.Keep, html.Consent);
+        Assert.Equal(HtmlAds.Keep, html.Ads);
+
+        var plain = new PdfRequest { Url = "https://example.com" }.ToOptions(new ShowcaseOptions());
+        Assert.Equal(HtmlConsent.Keep, plain.Consent);
+        Assert.Equal(HtmlAds.Keep, plain.Ads);
+        Assert.Equal(HtmlPdfLimits.Default.MaxNodes, plain.Limits.MaxNodes);
+
+        Assert.Throws<BadRequestException>(() => new PdfRequest { Url = "https://example.com", Ads = "maybe" }.ToOptions(host));
+    }
+
     [Fact]
     public async Task Info_SaysWhatThePrintSaysOfItself()
     {
@@ -216,6 +277,29 @@ public sealed class UrlToPdfApiTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.SendAsync(wrong)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(right)).StatusCode);
         Assert.Equal(1, _site.Hits("/page"));
+    }
+
+    /// <summary>As weblitzpdf.com/try's render service (WEBLITZ_TRY_KEY set), every request but /health carries the key
+    /// in X-Weblitz-Try-Key; the home page and the PDF alike are refused without it.</summary>
+    [Fact]
+    public async Task AsTrysRenderService_EveryRequestButHealth_CarriesTheKey()
+    {
+        using var api = Api(settings: ("WEBLITZ_TRY_KEY", "the-try-key"));
+        var client = api.CreateClient();
+
+        Assert.NotEqual(HttpStatusCode.Unauthorized, (await client.GetAsync("/health")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync($"/pdf?url={Page("/page")}")).StatusCode);
+        var wrong = new HttpRequestMessage(HttpMethod.Get, $"/pdf?url={Page("/page")}");
+        wrong.Headers.Add("X-Weblitz-Try-Key", "not-the-key");
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.SendAsync(wrong)).StatusCode);
+        Assert.Equal(0, _site.Hits("/page"));
+
+        var right = new HttpRequestMessage(HttpMethod.Post, "/pdf") { Content = JsonContent.Create(new { html = "<h1>From the site</h1>" }) };
+        right.Headers.Add("X-Weblitz-Try-Key", "the-try-key");
+        var response = await client.SendAsync(right);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/pdf", response.Content.Headers.ContentType!.MediaType);
     }
 
     [Fact]

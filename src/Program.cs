@@ -2,9 +2,13 @@
 //
 //   GET  /pdf?url=https://example.com            the PDF (application/pdf)
 //   POST /pdf   {"url": "https://example.com"}   the same, the settings in a JSON body
+//   POST /pdf   {"html": "<h1>Hello</h1>"}        the PDF of the HTML itself (its resources from public hosts)
 //   GET  /info?url=https://example.com           what the print says of itself, as JSON: pages, time, notes (no PDF)
 //   GET  /                                       a page with a form
 //   GET  /health                                 200 once the engine has printed a page
+//
+// Run as weblitzpdf.com/try's render service (its ops/weblitz-try), WEBLITZ_TRY_KEY set: every request but /health
+// carries that key in the X-Weblitz-Try-Key header, or is refused.
 //
 // The print settings are Puppeteer's page.pdf() options under the same names (PdfRequest.cs).
 
@@ -51,6 +55,19 @@ var app = builder.Build();
 // Weblitz:LicenseKey in the host's own configuration. Without one, each page carries the trial watermark.
 if (builder.Configuration["Weblitz:LicenseKey"] is { Length: > 0 } licenceKey)
     License.Activate(licenceKey);
+
+// Behind weblitzpdf.com/try only the site may call (WEBLITZ_TRY_KEY, an environment variable of the container): every
+// request but /health carries the key, compared in constant time, or is refused before anything else runs
+if (builder.Configuration["WEBLITZ_TRY_KEY"] is { Length: > 0 } tryKey)
+    app.Use(async (http, next) =>
+    {
+        if (http.Request.Path.Equals("/health", StringComparison.OrdinalIgnoreCase) || SameKey(http.Request.Headers["X-Weblitz-Try-Key"].ToString(), tryKey))
+        {
+            await next();
+            return;
+        }
+        await Results.Problem("This service answers weblitzpdf.com/try only.", statusCode: StatusCodes.Status401Unauthorized).ExecuteAsync(http);
+    });
 
 app.UseRateLimiter();
 app.UseDefaultFiles();
@@ -111,9 +128,25 @@ static async Task<IResult> Print(HttpContext http, Func<PdfRequest> read, Addres
         return Results.Problem(refused.Message, statusCode: StatusCodes.Status400BadRequest);
     }
 
-    var verdict = await guard.CheckAsync(request.Url, http.RequestAborted);
-    if (verdict.Address is not { } address)
-        return Results.Problem(verdict.Refusal, statusCode: StatusCodes.Status400BadRequest);
+    // Posted HTML, or a page's address checked before any render starts
+    Uri? address = null;
+    if (request.Html is { } html)
+    {
+        if (request.Url is { Length: > 0 })
+            return Results.Problem("Give the page's address or its HTML, not both.", statusCode: StatusCodes.Status400BadRequest);
+        if (Encoding.UTF8.GetByteCount(html) > showcase.MaxHtmlKilobytes * 1024)
+            return Results.Problem($"The HTML is larger than {showcase.MaxHtmlKilobytes:N0} KB.", statusCode: StatusCodes.Status413PayloadTooLarge);
+        if (string.IsNullOrWhiteSpace(html))
+            return Results.Problem("The HTML is empty.", statusCode: StatusCodes.Status400BadRequest);
+    }
+    else
+    {
+        var verdict = await guard.CheckAsync(request.Url, http.RequestAborted);
+        if (verdict.Address is not { } checkedAddress)
+            return Results.Problem(verdict.Refusal, statusCode: StatusCodes.Status400BadRequest);
+        address = checkedAddress;
+    }
+    var what = address?.AbsoluteUri ?? "The HTML";
 
     // A render is CPU work: a bounded number at once, the others wait their turn a few seconds
     using var place = await gate.EnterAsync(http.RequestAborted);
@@ -127,7 +160,9 @@ static async Task<IResult> Print(HttpContext http, Func<PdfRequest> read, Addres
     var watch = Stopwatch.StartNew();
     try
     {
-        result = await HtmlToPdf.RenderUrlAsync(address, options, http.RequestAborted);
+        result = address is null
+            ? await HtmlToPdf.RenderAsync(request.Html!, options, http.RequestAborted)
+            : await HtmlToPdf.RenderUrlAsync(address, options, http.RequestAborted);
     }
     catch (ArgumentException refused)           // a setting the engine does not take ("format=A9", a margin that is no length)
     {
@@ -135,8 +170,8 @@ static async Task<IResult> Print(HttpContext http, Func<PdfRequest> read, Addres
     }
     catch (HtmlRenderException failed)          // no PDF at all: the page did not answer, or is past the limits
     {
-        log.LogInformation("{Address}: no PDF: {Reason}", address, failed.Message);
-        return Results.Problem($"{address} could not be printed: {failed.Message}", statusCode: StatusCodes.Status502BadGateway);
+        log.LogInformation("{Address}: no PDF: {Reason}", what, failed.Message);
+        return Results.Problem($"{what} could not be printed: {failed.Message}", statusCode: StatusCodes.Status502BadGateway);
     }
     catch (OperationCanceledException)
     {
@@ -144,15 +179,15 @@ static async Task<IResult> Print(HttpContext http, Func<PdfRequest> read, Addres
     }
 
     log.LogInformation("{Address}: {Pages} pages in {Elapsed:0} ms, {Notes} notes, document status {Status}",
-        address, result.PageCount, watch.Elapsed.TotalMilliseconds, result.Notes.Count, result.HttpStatus);
+        what, result.PageCount, watch.Elapsed.TotalMilliseconds, result.Notes.Count, result.HttpStatus);
 
     if (request.FailOnHttpError == true && result.HttpStatus is >= 400)
-        return Results.Problem($"{address} answered {result.HttpStatus}.", statusCode: StatusCodes.Status502BadGateway);
+        return Results.Problem($"{what} answered {result.HttpStatus}.", statusCode: StatusCodes.Status502BadGateway);
 
     if (!pdf)
         return Results.Json(new
         {
-            url = address.AbsoluteUri,
+            url = address?.AbsoluteUri,
             pages = result.PageCount,
             elapsedMs = Math.Round(result.Elapsed.TotalMilliseconds),
             completed = result.Completed,
@@ -161,7 +196,7 @@ static async Task<IResult> Print(HttpContext http, Func<PdfRequest> read, Addres
         });
 
     if (result.Pdf is not { Length: > 0 } bytes)
-        return Results.Problem($"{address} printed no page.", statusCode: StatusCodes.Status502BadGateway);
+        return Results.Problem($"{what} printed no page.", statusCode: StatusCodes.Status502BadGateway);
 
     // What the print says of itself, beside the PDF (GET /info gives the notes themselves)
     var headers = http.Response.Headers;

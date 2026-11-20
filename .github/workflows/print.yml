@@ -1,9 +1,12 @@
 name: Print a page
 
-# The showcase, live on GitHub: open an issue with the "Print a page" form (or run this workflow by hand) and the API,
-# started from its published image, prints the page; the PDF is the run's artifact, linked from a comment on the issue.
+# The showcase, live on GitHub, and "Break it": open an issue with the "Print a page" form (or run this workflow by hand)
+# and the API, started from its published image, prints the page with Weblitz; Chrome 156 prints the same address beside
+# it. Both PDFs and their first pages side by side are the run's artifact, linked from a comment on the issue that asks
+# what differs. A difference is a bug, fixed in the next beta.
 # What an issue says is a stranger's text: it is read as data (never part of a command) and held to an address and a
-# paper's name; the API itself prints public pages only.
+# paper's name; the API prints public pages only, and Chrome's requests to the machine's own or private addresses are
+# refused too.
 on:
   issues:
     types: [opened]
@@ -36,7 +39,7 @@ jobs:
   print:
     if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'print') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
     - name: Read the request
       id: request
@@ -75,7 +78,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Print
+    - name: Print with Weblitz
       id: print
       if: steps.request.outputs.ok == 'true'
       env:
@@ -85,7 +88,7 @@ jobs:
       run: |
         docker run -d --name api -p 8080:8080 "ghcr.io/${GITHUB_REPOSITORY,,}:latest" > /dev/null
         for i in $(seq 1 60); do curl -fs http://localhost:8080/health > /dev/null && break; sleep 2; done
-        status=$(curl -s -G -o page.pdf -D headers.txt -w '%{http_code}' --max-time 180 \
+        status=$(curl -s -G -o weblitz.pdf -D headers.txt -w '%{http_code}' --max-time 180 \
           --data-urlencode "url=$PAGE_URL" --data-urlencode "format=$PAGE_FORMAT" --data-urlencode "landscape=$PAGE_LANDSCAPE" \
           http://localhost:8080/pdf)
         header() { grep -i "^$1:" headers.txt | head -1 | cut -d' ' -f2- | tr -d '\r'; }
@@ -94,21 +97,102 @@ jobs:
           echo "pages=$(header X-Weblitz-Pages)"
           echo "elapsed=$(header X-Weblitz-Elapsed-Ms)"
           echo "site=$(header X-Weblitz-Document-Status)"
-          echo "size=$(( $(stat -c %s page.pdf) / 1024 ))"
+          echo "size=$(( $(stat -c %s weblitz.pdf) / 1024 ))"
         } >> "$GITHUB_OUTPUT"
         if [ "$status" != 200 ]; then
           # (the API's refusal: JSON with its reason)
-          echo "reason=$(python3 -c 'import json,sys; print(json.load(open("page.pdf")).get("detail", "")[:300].replace("\n", " "))' 2>/dev/null)" >> "$GITHUB_OUTPUT"
-          rm -f page.pdf
+          echo "reason=$(python3 -c 'import json,sys; print(json.load(open("weblitz.pdf")).get("detail", "")[:300].replace("\n", " "))' 2>/dev/null)" >> "$GITHUB_OUTPUT"
+          rm -f weblitz.pdf
         fi
 
-    - name: Keep the PDF
+    - uses: actions/setup-node@v4
+      if: steps.print.outputs.status == '200'
+      with:
+        node-version: '22'
+
+    # The same address in Chrome 156's headless shell (the version Weblitz's measurements use), driven by Puppeteer:
+    # loaded, a moment of quiet on the network, then printed to the same paper with backgrounds, as page.pdf() does.
+    # No secret is in this step's environment; requests to private or the machine's own addresses are refused.
+    - name: Print with Chrome
+      id: chrome
+      if: steps.print.outputs.status == '200'
+      env:
+        PAGE_URL: ${{ steps.request.outputs.url }}
+        PAGE_FORMAT: ${{ steps.request.outputs.format }}
+        PAGE_LANDSCAPE: ${{ steps.request.outputs.landscape }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/chrome-print"
+        cd "$RUNNER_TEMP/chrome-print"
+        npm init -y > /dev/null
+        npm install --no-audit --no-fund puppeteer-core@25.18.1 > /dev/null
+        npx --yes @puppeteer/browsers@3.2.7 install chrome-headless-shell@156.0.8078.47 --path "$RUNNER_TEMP/chrome" | tail -1 > installed.txt
+        export CHROME_PATH="$(cut -d' ' -f2- installed.txt)"
+        cat > print.mjs <<'JS'
+        import puppeteer from 'puppeteer-core';
+        import { writeFileSync } from 'node:fs';
+        import { isIP } from 'node:net';
+
+        // The machine's own, private, link-local (clouds' metadata), carriers' shared and reserved addresses
+        function isPrivate(host) {
+          host = host.replace(/^\[|\]$/g, '').toLowerCase();
+          if (host === 'localhost' || host.endsWith('.localhost')) return true;
+          if (isIP(host) === 4) {
+            const [a, b] = host.split('.').map(Number);
+            return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254)
+              || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224;
+          }
+          if (isIP(host) === 6) return host === '::1' || host === '::' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host) || host.startsWith('::ffff:');
+          return false;
+        }
+
+        const browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH, headless: 'shell', args: ['--no-sandbox'] });
+        try {
+          const page = await browser.newPage();
+          await page.setRequestInterception(true);
+          page.on('request', request => {
+            let host = '';
+            try { host = new URL(request.url()).hostname; } catch { }
+            if (host && isPrivate(host)) request.abort('accessdenied'); else request.continue();
+          });
+          await page.goto(process.env.PAGE_URL, { waitUntil: 'load', timeout: 90000 });
+          await page.waitForNetworkIdle({ idleTime: 500, timeout: 15000 }).catch(() => { });
+          const pdf = await page.pdf({ format: process.env.PAGE_FORMAT, landscape: process.env.PAGE_LANDSCAPE === 'true', printBackground: true, timeout: 120000 });
+          writeFileSync(process.argv[2], pdf);
+        } finally {
+          await browser.close();
+        }
+        JS
+        if node print.mjs "$GITHUB_WORKSPACE/chrome.pdf" > chrome.log 2>&1; then
+          echo "status=200" >> "$GITHUB_OUTPUT"
+        else
+          echo "status=failed" >> "$GITHUB_OUTPUT"
+          echo "reason=$(grep -m1 -E '^[A-Za-z]*Error: ' chrome.log | cut -c1-300 | tr -d '\r')" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Picture both first pages side by side
+      id: pictures
+      if: steps.chrome.outputs.status == '200'
+      run: |
+        sudo apt-get update -qq > /dev/null
+        sudo apt-get install -y -qq --no-install-recommends poppler-utils imagemagick > /dev/null
+        pdftoppm -png -r 60 -f 1 -l 1 -singlefile weblitz.pdf weblitz-page1
+        pdftoppm -png -r 60 -f 1 -l 1 -singlefile chrome.pdf chrome-page1
+        # (Weblitz on the left, Chrome on the right, a white gap between)
+        convert weblitz-page1.png -background white -gravity west -extent "$(( $(identify -format %w weblitz-page1.png) + 24 ))x$(identify -format %h weblitz-page1.png)" side-left.png
+        convert side-left.png chrome-page1.png -background white -gravity north +append side-by-side.png
+        echo "chrome_pages=$(pdfinfo chrome.pdf | awk '/^Pages:/ {print $2}')" >> "$GITHUB_OUTPUT"
+
+    - name: Keep the PDFs
       id: artifact
       if: steps.print.outputs.status == '200'
       uses: actions/upload-artifact@v4
       with:
-        name: page-pdf
-        path: page.pdf
+        name: break-it
+        path: |
+          weblitz.pdf
+          chrome.pdf
+          side-by-side.png
+        if-no-files-found: ignore
         retention-days: 3
 
     - name: Say the result
@@ -123,17 +207,32 @@ jobs:
         SITE: ${{ steps.print.outputs.site }}
         SIZE: ${{ steps.print.outputs.size }}
         REASON: ${{ steps.print.outputs.reason }}
+        CHROME: ${{ steps.chrome.outputs.status }}
+        CHROME_REASON: ${{ steps.chrome.outputs.reason }}
+        CHROME_PAGES: ${{ steps.pictures.outputs.chrome_pages }}
         ARTIFACT: ${{ steps.artifact.outputs.artifact-url }}
         RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         if [ "$OK" != true ]; then
           text="That is not an address I can print: write an http or https address, like https://example.com."
         elif [ "$STATUS" = 200 ]; then
-          text="Printed \`$PAGE_URL\`: $PAGES page(s) in $ELAPSED ms, $SIZE KB.
+          if [ "$CHROME" = 200 ]; then
+            text="Printed \`$PAGE_URL\` with Weblitz and with Chrome 156.
 
-        **[Download the PDF]($ARTIFACT)** (a zip holding page.pdf; kept three days; GitHub asks you to be signed in).
+        **[Download both PDFs and their first pages side by side]($ARTIFACT)**: a zip holding weblitz.pdf, chrome.pdf and side-by-side.png (Weblitz on the left, Chrome on the right), kept three days; GitHub asks you to be signed in.
 
-        Printed by [Weblitz](https://weblitzpdf.com) without a licence, so each page carries the trial watermark. [This run]($RUN)."
+        - Weblitz: $PAGES page(s) in $ELAPSED ms, $SIZE KB, printed without a licence, so each page carries the trial watermark.
+        - Chrome 156 (its headless shell, driven by Puppeteer): $CHROME_PAGES page(s).
+
+        **What differs?** Reply here with what you see. A page Weblitz prints differently from Chrome is a bug, and the next beta fixes it. [This run]($RUN)."
+          else
+            CHROME_REASON=${CHROME_REASON%.}
+            text="Printed \`$PAGE_URL\` with Weblitz: $PAGES page(s) in $ELAPSED ms, $SIZE KB.
+
+        **[Download the PDF]($ARTIFACT)** (a zip holding weblitz.pdf; kept three days; GitHub asks you to be signed in). Printed without a licence, so each page carries the trial watermark.
+
+        Chrome did not print it here (${CHROME_REASON:-no reason given}), so there is nothing to set beside it. [This run]($RUN)."
+          fi
           [ -n "$SITE" ] && [ "$SITE" != 200 ] && text="$text
 
         The site answered $SITE: what it sent for that is what was printed."
@@ -145,5 +244,10 @@ jobs:
         if [ -n "$ISSUE" ]; then
           printf '%s\n' "$text" > comment.md
           gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file comment.md
-          gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" --reason "$([ "$STATUS" = 200 ] && echo completed || echo 'not planned')"
+          # (a print with Chrome beside it stays open for the answer to "What differs?"; the rest is done)
+          if [ "$STATUS" != 200 ]; then
+            gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" --reason "not planned"
+          elif [ "$CHROME" != 200 ]; then
+            gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" --reason completed
+          fi
         fi
